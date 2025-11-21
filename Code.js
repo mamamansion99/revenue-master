@@ -97,7 +97,7 @@ function importHorganice() {
 
     // schema
     const SCHEMA = ['BillID','Room','Tenant','Month','AmountDue','DueDate',
-                    'Status','PaidAt','SlipID','Account','ChargeItems','Notes'];
+                    'Status','PaidAt','SlipID','Account','BankMatchStatus','ChargeItems','Notes'];
 
     for (let r = headerRow + 1; r < all.length; r++) {
       const row = all[r];
@@ -129,7 +129,7 @@ function importHorganice() {
 
       rowsToUpsert.push([
         billId, room, tenant, monthStr, amountDue, dueStr,
-        'Unpaid', '', '', account, chargeParts.join('; '), `Imported: ${latest.getName()}`
+        'Unpaid', '', '', account, '', chargeParts.join('; '), `Imported: ${latest.getName()}`
       ]);
     }
 
@@ -595,4 +595,3 @@ function importBankCsv(){
     ].join('\n')
   );
 }
-

@@ -252,7 +252,7 @@ function getAccountFromRoom_(roomStr) {
       case '1':
         return "KKK+";
       case '2':
-        return "TMK+";
+        return "MAK+";
       case '3':
         return "KGSI";
       case '4':

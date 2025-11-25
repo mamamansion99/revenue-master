@@ -81,6 +81,7 @@ function importHorganice() {
     const idxRoom   = findHeaderIndex(header, [/^room$/i, /^ห้อง$/i]);
     const idxTenant = findHeaderIndex(header, [/tenant|name/i, /ผู้เช่า|ชื่อ/i]);
     const idxDue    = findHeaderIndex(header, [/due|date/i, /ครบกำหนด|กำหนดชำระ|วันที่/i]); // optional
+    const idxTotal  = findHeaderIndex(header, [/รวมสุทธิ|ยอดรวม|ต้องชำระ|^รวม$/i]); // prefer explicit total column
 
     const chargeMatchers = [
       /amount|total/i,
@@ -128,15 +129,30 @@ function importHorganice() {
       let amountDue = 0;
       let hasAny = false;
       const chargeParts = [];
-      chargeColIdx.forEach(i => {
-        const val = row[i];
-        const num = toNumber(val);
+
+      // Prefer explicit "รวม/ยอดรวม" column if present
+      if (idxTotal >= 0) {
+        const num = toNumber(row[idxTotal]);
         if (num != null && !isNaN(num) && num !== 0) {
           hasAny = true;
-          amountDue += num;
-          chargeParts.push(`${header[i]} ${num}`);
+          amountDue = num;
+          chargeParts.push(`${header[idxTotal]} ${num}`);
         }
-      });
+      }
+
+      // Fallback to summing charge columns if no usable total
+      if (!hasAny) {
+        chargeColIdx.forEach(i => {
+          const val = row[i];
+          const num = toNumber(val);
+          if (num != null && !isNaN(num) && num !== 0) {
+            hasAny = true;
+            amountDue += num;
+            chargeParts.push(`${header[i]} ${num}`);
+          }
+        });
+      }
+
       if (!hasAny) continue;
 
       const dueStr  = idxDue >= 0 ? formatAsDateString(row[idxDue]) : "";

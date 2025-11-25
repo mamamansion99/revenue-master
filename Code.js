@@ -11,6 +11,22 @@ function onOpen() {
     .addToUi();
 }
 
+/***** BILLING CYCLE HELPER (match PAY_RENT: 24th onward = next month) *****/
+function getBillingYmForDate_(d){
+  const tz  = Session.getScriptTimeZone() || 'Asia/Bangkok';
+  const y   = Number(Utilities.formatDate(d, tz, 'yyyy'));
+  const m   = Number(Utilities.formatDate(d, tz, 'MM')) - 1; // 0-based
+  const day = Number(Utilities.formatDate(d, tz, 'dd'));
+
+  let targetY = y;
+  let targetM = m;
+  if (day >= 24) {
+    targetM += 1;
+    if (targetM > 11) { targetM = 0; targetY += 1; }
+  }
+  return targetY + '-' + String(targetM + 1).padStart(2, '0'); // YYYY-MM
+}
+
 /***** ====== Horganice → Horga_Bills ====== *****/
 function importHorganice() {
   const ui = SpreadsheetApp.getUi();
@@ -92,7 +108,7 @@ function importHorganice() {
     }
 
     // 6) build output rows (NO clearing — we will upsert)
-    const monthStr = Utilities.formatDate(new Date(latestTs), Session.getScriptTimeZone(), "yyyy-MM");
+    const monthStr = getBillingYmForDate_(new Date(latestTs)); // align with PAY_RENT billing window
     const rowsToUpsert = []; // each is an array in the schema below
 
     // schema

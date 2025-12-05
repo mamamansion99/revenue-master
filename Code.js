@@ -113,7 +113,7 @@ function importHorganice() {
     const rowsToUpsert = []; // each is an array in the schema below
 
     // schema
-    const SCHEMA = ['BillID','Room','Tenant','Month','AmountDue','DueDate',
+    const SCHEMA = ['BillID','Room','Tenant','Month','Type','AmountDue','DueDate',
                     'Status','PaidAt','SlipID','Account','BankMatchStatus','ChargeItems','Notes'];
 
     for (let r = headerRow + 1; r < all.length; r++) {
@@ -160,8 +160,20 @@ function importHorganice() {
       const billId  = `${monthStr}-${room}`;
 
       rowsToUpsert.push([
-        billId, room, tenant, monthStr, amountDue, dueStr,
-        'Unpaid', '', '', account, '', chargeParts.join('; '), `Imported: ${latest.getName()}`
+        billId,
+        room,
+        tenant,
+        monthStr,
+        'Rent',
+        amountDue,
+        dueStr,
+        'Unpaid',
+        '',
+        '',
+        account,
+        '',
+        chargeParts.join('; '),
+        `Imported: ${latest.getName()}`
       ]);
     }
 

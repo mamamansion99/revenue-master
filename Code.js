@@ -648,56 +648,23 @@ function handleHorgaBillsStatusEdit_(e) {
   const sh = e.range.getSheet();
   if (sh.getName() !== 'Horga_Bills') return;
 
-  const row = e.range.getRow();
-  if (row <= 1) return; // skip header
-
   const headers = getHeadersRM_(sh);
   let cStatus = idxOfRM_(headers, 'status');
   const statusCol = (cStatus >= 0) ? (cStatus + 1) : 8; // fallback: Column H
-  if (e.range.getColumn() !== statusCol) return;
 
-  const newVal = String(e.value || '').trim();
-  if (!newVal) return;
-  const newLower = newVal.toLowerCase();
-  const isSlipReceived = (newLower.indexOf('slip received') !== -1) || (newLower.indexOf('รับสลิป') !== -1);
-  if (!isSlipReceived) return;
-
-  const oldLower = String(e.oldValue || '').trim().toLowerCase();
-  if (oldLower && ((oldLower.indexOf('slip received') !== -1) || (oldLower.indexOf('รับสลิป') !== -1))) {
-    return; // already slip received
-  }
+  const rStart = e.range.getRow();
+  const rEnd = rStart + e.range.getNumRows() - 1;
+  const cStart = e.range.getColumn();
+  const cEnd = cStart + e.range.getNumColumns() - 1;
+  if (statusCol < cStart || statusCol > cEnd) return; // edit does not touch Status
 
   const lastCol = sh.getLastColumn();
-  const rowVals = sh.getRange(row, 1, 1, lastCol).getValues()[0];
-
-  const cBill   = idxOfRM_(headers, 'billid');
-  const cMonth  = idxOfRM_(headers, 'month');
-  const cAmt    = idxOfRM_(headers, 'amountdue');
-  const cPaidAt = idxOfRM_(headers, 'paidat');
-  const cSlip   = idxOfRM_(headers, 'slipid');
-  const cAcct   = idxOfRM_(headers, 'account');
-
-  const billId = (cBill >= 0) ? String(rowVals[cBill] || '').trim() : '';
-  if (!billId) {
-    Logger.log('Horga_Bills: missing BillID at row ' + row);
-    return;
-  }
-
-  const amountDue = (cAmt >= 0) ? toNumber(rowVals[cAmt]) : null;
-  if (amountDue == null || isNaN(amountDue)) {
-    Logger.log('Horga_Bills: missing AmountDue for bill ' + billId);
-    return;
-  }
-
-  const monthVal = (cMonth >= 0) ? String(rowVals[cMonth] || '').trim() : '';
-  const ym = normalizeYmRM_(monthVal, billId);
-  const slipId = (cSlip >= 0) ? String(rowVals[cSlip] || '').trim() : '';
-  const account = (cAcct >= 0) ? String(rowVals[cAcct] || '').trim() : '';
-
-  if (cPaidAt >= 0) {
-    const paidAtVal = rowVals[cPaidAt];
-    if (!paidAtVal) sh.getRange(row, cPaidAt + 1).setValue(new Date());
-  }
+  const cBill   = (idxOfRM_(headers, 'billid')   >= 0) ? idxOfRM_(headers, 'billid')   : 0;  // A
+  const cMonth  = (idxOfRM_(headers, 'month')    >= 0) ? idxOfRM_(headers, 'month')    : 3;  // D
+  const cAmt    = (idxOfRM_(headers, 'amountdue')>= 0) ? idxOfRM_(headers, 'amountdue'): 5;  // F
+  const cPaidAt = (idxOfRM_(headers, 'paidat')   >= 0) ? idxOfRM_(headers, 'paidat')   : 8;  // I
+  const cSlip   = (idxOfRM_(headers, 'slipid')   >= 0) ? idxOfRM_(headers, 'slipid')   : 9;  // J
+  const cAcct   = (idxOfRM_(headers, 'account')  >= 0) ? idxOfRM_(headers, 'account')  : 10; // K
 
   const ledger = sh.getParent().getSheetByName('Receipts_Ledger');
   if (!ledger) {
@@ -705,25 +672,61 @@ function handleHorgaBillsStatusEdit_(e) {
     return;
   }
 
-  if (receiptLedgerHasEntryRM_(ledger, billId, slipId)) {
-    Logger.log('Receipts_Ledger already has entry for BillID=' + billId);
-    return;
-  }
+  for (let row = rStart; row <= rEnd; row++) {
+    if (row <= 1) continue; // skip header
 
-  appendReceiptLedgerRM_(ledger, {
-    ym: ym,
-    txnType: 'RentPayment',
-    category: 'RENT_PAYMENT',
-    amount: amountDue,
-    bankAccountCode: account,
-    billId: billId,
-    slipId: slipId,
-    slipLink: '',
-    bankTxnId: '',
-    lineUserId: '',
-    source: 'MANUAL_HORGA_BILLS',
-    note: 'Manual status edit in Horga_Bills'
-  });
+    const statusVal = String(sh.getRange(row, statusCol).getValue() || '').trim();
+    if (!statusVal) continue;
+    const statusLower = statusVal.toLowerCase();
+    const isSlipReceived =
+      (statusLower.indexOf('slip received') !== -1) ||
+      (statusLower.indexOf('slip recived') !== -1) ||
+      (statusLower.indexOf('รับสลิป') !== -1);
+    if (!isSlipReceived) continue;
+
+    const rowVals = sh.getRange(row, 1, 1, lastCol).getValues()[0];
+    const billId = String(rowVals[cBill] || '').trim();
+    if (!billId) {
+      Logger.log('Horga_Bills: missing BillID at row ' + row);
+      continue;
+    }
+
+    const amountDue = toNumber(rowVals[cAmt]);
+    if (amountDue == null || isNaN(amountDue)) {
+      Logger.log('Horga_Bills: missing AmountDue for bill ' + billId);
+      continue;
+    }
+
+    const monthVal = String(rowVals[cMonth] || '').trim();
+    const ym = normalizeYmRM_(monthVal, billId);
+    const slipId = String(rowVals[cSlip] || '').trim();
+    const account = String(rowVals[cAcct] || '').trim();
+
+    if (cPaidAt >= 0) {
+      const paidAtVal = rowVals[cPaidAt];
+      if (!paidAtVal) sh.getRange(row, cPaidAt + 1).setValue(new Date());
+    }
+
+    if (receiptLedgerHasEntryRM_(ledger, billId, slipId)) {
+      Logger.log('Receipts_Ledger already has entry for BillID=' + billId);
+      continue;
+    }
+
+    appendReceiptLedgerRM_(ledger, {
+      ym: ym,
+      txnType: 'RentPayment',
+      category: 'RENT_PAYMENT',
+      amount: amountDue,
+      bankAccountCode: account,
+      billId: billId,
+      slipId: slipId,
+      slipLink: '',
+      bankTxnId: '',
+      lineUserId: '',
+      source: 'MANUAL_HORGA_BILLS',
+      note: 'Manual status edit in Horga_Bills'
+    });
+  }
 }
 
 function getHeadersRM_(sh) {

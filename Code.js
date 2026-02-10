@@ -114,7 +114,7 @@ function importHorganice() {
 
     // schema
     const SCHEMA = ['BillID','Room','Tenant','Month','Type','AmountDue','DueDate',
-                    'Status','PaidAt','SlipID','Account','BankMatchStatus','ChargeItems','Notes'];
+                    'Status','PaidAt','SlipID','Account','OCR_Account','BankMatchStatus','ChargeItems','Notes'];
 
     for (let r = headerRow + 1; r < all.length; r++) {
       const row = all[r];
@@ -172,6 +172,7 @@ function importHorganice() {
         '',
         account,
         '',
+        '',
         chargeParts.join('; '),
         `Imported: ${latest.getName()}`
       ]);
@@ -181,17 +182,10 @@ function importHorganice() {
     const master = SpreadsheetApp.getActiveSpreadsheet();
     const sh = master.getSheetByName("Horga_Bills") || master.insertSheet("Horga_Bills");
 
-    // ensure header present and exact order
-    const existingLastRow = sh.getLastRow();
-    let headerOk = false;
-    if (existingLastRow >= 1) {
-      const firstRow = sh.getRange(1,1,1,SCHEMA.length).getValues()[0].map(x => String(x||''));
-      headerOk = SCHEMA.every((h, i) => (firstRow[i] || '') === h);
-    }
-    if (!headerOk) {
-      sh.clear(); // just clear this sheet once to place the correct header (not every import)
-      sh.getRange(1,1,1,SCHEMA.length).setValues([SCHEMA]);
-    }
+    // ensure header present and exact order (do NOT clear existing data)
+    const firstRow = sh.getRange(1,1,1,SCHEMA.length).getValues()[0].map(x => String(x||''));
+    const headerOk = SCHEMA.every((h, i) => (firstRow[i] || '') === h);
+    if (!headerOk) sh.getRange(1,1,1,SCHEMA.length).setValues([SCHEMA]);
 
     // build BillID -> rowIndex map (existing)
     const lastRow = sh.getLastRow();
@@ -638,4 +632,200 @@ function importBankCsv(){
       `แมปคอลัมน์ → Date:${map.idxDate}  Credit:${map.idxCredit}  Debit:${map.idxDebit}  Amount:${map.idxAmount}  Type:${map.idxType}  Ref:${map.idxRef}  Desc:${map.idxDesc}`
     ].join('\n')
   );
+}
+
+/***** ====== Manual Slip Received → Receipts_Ledger (Horga_Bills) ====== *****/
+function onEdit(e) {
+  try {
+    handleHorgaBillsStatusEdit_(e);
+  } catch (err) {
+    Logger.log('onEdit error: ' + err);
+  }
+}
+
+function handleHorgaBillsStatusEdit_(e) {
+  if (!e || !e.range) return;
+  const sh = e.range.getSheet();
+  if (sh.getName() !== 'Horga_Bills') return;
+
+  const row = e.range.getRow();
+  if (row <= 1) return; // skip header
+
+  const headers = getHeadersRM_(sh);
+  let cStatus = idxOfRM_(headers, 'status');
+  const statusCol = (cStatus >= 0) ? (cStatus + 1) : 8; // fallback: Column H
+  if (e.range.getColumn() !== statusCol) return;
+
+  const newVal = String(e.value || '').trim();
+  if (!newVal) return;
+  const newLower = newVal.toLowerCase();
+  const isSlipReceived = (newLower.indexOf('slip received') !== -1) || (newLower.indexOf('รับสลิป') !== -1);
+  if (!isSlipReceived) return;
+
+  const oldLower = String(e.oldValue || '').trim().toLowerCase();
+  if (oldLower && ((oldLower.indexOf('slip received') !== -1) || (oldLower.indexOf('รับสลิป') !== -1))) {
+    return; // already slip received
+  }
+
+  const lastCol = sh.getLastColumn();
+  const rowVals = sh.getRange(row, 1, 1, lastCol).getValues()[0];
+
+  const cBill   = idxOfRM_(headers, 'billid');
+  const cMonth  = idxOfRM_(headers, 'month');
+  const cAmt    = idxOfRM_(headers, 'amountdue');
+  const cPaidAt = idxOfRM_(headers, 'paidat');
+  const cSlip   = idxOfRM_(headers, 'slipid');
+  const cAcct   = idxOfRM_(headers, 'account');
+
+  const billId = (cBill >= 0) ? String(rowVals[cBill] || '').trim() : '';
+  if (!billId) {
+    Logger.log('Horga_Bills: missing BillID at row ' + row);
+    return;
+  }
+
+  const amountDue = (cAmt >= 0) ? toNumber(rowVals[cAmt]) : null;
+  if (amountDue == null || isNaN(amountDue)) {
+    Logger.log('Horga_Bills: missing AmountDue for bill ' + billId);
+    return;
+  }
+
+  const monthVal = (cMonth >= 0) ? String(rowVals[cMonth] || '').trim() : '';
+  const ym = normalizeYmRM_(monthVal, billId);
+  const slipId = (cSlip >= 0) ? String(rowVals[cSlip] || '').trim() : '';
+  const account = (cAcct >= 0) ? String(rowVals[cAcct] || '').trim() : '';
+
+  if (cPaidAt >= 0) {
+    const paidAtVal = rowVals[cPaidAt];
+    if (!paidAtVal) sh.getRange(row, cPaidAt + 1).setValue(new Date());
+  }
+
+  const ledger = sh.getParent().getSheetByName('Receipts_Ledger');
+  if (!ledger) {
+    Logger.log('Receipts_Ledger sheet not found');
+    return;
+  }
+
+  if (receiptLedgerHasEntryRM_(ledger, billId, slipId)) {
+    Logger.log('Receipts_Ledger already has entry for BillID=' + billId);
+    return;
+  }
+
+  appendReceiptLedgerRM_(ledger, {
+    ym: ym,
+    txnType: 'RentPayment',
+    category: 'RENT_PAYMENT',
+    amount: amountDue,
+    bankAccountCode: account,
+    billId: billId,
+    slipId: slipId,
+    slipLink: '',
+    bankTxnId: '',
+    lineUserId: '',
+    source: 'MANUAL_HORGA_BILLS',
+    note: 'Manual status edit in Horga_Bills'
+  });
+}
+
+function getHeadersRM_(sh) {
+  const lastCol = sh.getLastColumn();
+  if (lastCol < 1) return [];
+  return sh.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim());
+}
+
+function idxOfRM_(hdr, key) {
+  const keyNorm = String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (let i = 0; i < hdr.length; i++) {
+    const hNorm = String(hdr[i] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (hNorm === keyNorm || hNorm.indexOf(keyNorm) !== -1) return i;
+  }
+  return -1;
+}
+
+function normalizeYmRM_(ym, billId) {
+  const s = String(ym || '').trim();
+  if (s) return s;
+  const m = String(billId || '').match(/\b(\d{4}-\d{2})\b/);
+  return m ? m[1] : '';
+}
+
+function receiptLedgerHasEntryRM_(ledgerSh, billId, slipId) {
+  if (!billId && !slipId) return false;
+  const hdr = getHeadersRM_(ledgerSh);
+  const cBill = idxOfRM_(hdr, 'billid');
+  const cSlip = idxOfRM_(hdr, 'slipid');
+  if (cBill < 0 && cSlip < 0) return false;
+
+  const lastRow = ledgerSh.getLastRow();
+  if (lastRow < 2) return false;
+
+  const lastCol = ledgerSh.getLastColumn();
+  const data = ledgerSh.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const bill = (cBill >= 0) ? String(row[cBill] || '').trim() : '';
+    const slip = (cSlip >= 0) ? String(row[cSlip] || '').trim() : '';
+
+    if (billId && bill && bill === billId) return true;
+    if (!billId && slipId && slip && slip === slipId) return true;
+    if (billId && slipId && bill === billId && slip === slipId) return true;
+  }
+  return false;
+}
+
+function appendReceiptLedgerRM_(ledgerSh, entry) {
+  try {
+    const hdr = getHeadersRM_(ledgerSh);
+    const writes = [];
+    const setValue = (key, value) => {
+      if (!key || key === 'ReceiptID' || key === 'SlipID') return;
+      const idx = idxOfRM_(hdr, key);
+      if (idx > -1) writes.push({ col: idx + 1, value: value ?? '' });
+    };
+    const setNumber = (key, value) => {
+      if (value == null) return setValue(key, '');
+      const num = Number(value);
+      setValue(key, isFinite(num) ? num : '');
+    };
+
+    setValue('Date', entry.date || new Date());
+    setValue('YM', entry.ym || '');
+    setValue('TxnType', entry.txnType || '');
+    setValue('Category', entry.category || '');
+    setNumber('Amount', entry.amount);
+    setValue('BankAccountCode', entry.bankAccountCode || '');
+    setValue('BillID', entry.billId || '');
+    setValue('SlipLink', entry.slipLink || '');
+    setValue('BankTxnID', entry.bankTxnId || '');
+    setValue('LineUserId', entry.lineUserId || '');
+    setValue('Source', entry.source || '');
+    setValue('Note', entry.note || '');
+
+    const startRow = 2;
+    const maxRows = Math.max(ledgerSh.getMaxRows(), startRow);
+    const checkCols = Math.min(Math.max(hdr.length - 1, 1), 13);
+    const rowsToCheck = Math.max(maxRows - startRow + 1, 1);
+    const dataCheck = ledgerSh.getRange(startRow, 2, rowsToCheck, checkCols).getValues();
+    let lastDataRow = startRow - 1;
+    for (let i = dataCheck.length - 1; i >= 0; i--) {
+      const rowValues = dataCheck[i];
+      if (rowValues.some(cell => cell !== '' && cell != null)) {
+        lastDataRow = startRow + i;
+        break;
+      }
+    }
+    const targetRow = Math.max(lastDataRow + 1, startRow);
+    if (targetRow > ledgerSh.getMaxRows()) {
+      ledgerSh.insertRowsAfter(ledgerSh.getMaxRows(), targetRow - ledgerSh.getMaxRows());
+    }
+
+    writes.forEach(({ col, value }) => {
+      ledgerSh.getRange(targetRow, col).setValue(value);
+    });
+
+    Logger.log('appendReceiptLedgerRM_: appended row ' + targetRow + ' bill=' + (entry.billId || '') + ' amount=' + (entry.amount || ''));
+    return targetRow;
+  } catch (err) {
+    Logger.log('appendReceiptLedgerRM_ failed: ' + err);
+    return '';
+  }
 }

@@ -745,10 +745,33 @@ function idxOfRM_(hdr, key) {
 }
 
 function normalizeYmRM_(ym, billId) {
-  const s = String(ym || '').trim();
-  if (s) return s;
-  const m = String(billId || '').match(/\b(\d{4}-\d{2})\b/);
-  return m ? m[1] : '';
+  const raw = ym;
+  let y = null, m = null;
+
+  if (Object.prototype.toString.call(raw) === '[object Date]') {
+    y = raw.getFullYear();
+    m = raw.getMonth() + 1; // 1-based
+  } else {
+    const s = String(raw || '').trim();
+    const m1 = s.match(/^(\d{4})[\/\-]?([01]?\d)$/);
+    const m2 = s.match(/^(\d{4})[\/\-]([01]?\d)[\/\-]\d{1,2}$/);
+    if (m1) { y = Number(m1[1]); m = Number(m1[2]); }
+    else if (m2) { y = Number(m2[1]); m = Number(m2[2]); }
+  }
+
+  if (y == null || m == null) {
+    const mId = String(billId || '').match(/\b(\d{4})-(\d{2})\b/);
+    if (mId) { y = Number(mId[1]); m = Number(mId[2]); }
+  }
+
+  if (y == null || m == null) return '';
+
+  // YM should be previous month of Horga_Bills Month
+  const d = new Date(y, m - 1, 1);
+  d.setMonth(d.getMonth() - 1);
+  const yy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return `${yy}-${mm}`;
 }
 
 function receiptLedgerHasEntryRM_(ledgerSh, billId, slipId) {

@@ -9,6 +9,7 @@ function onOpen() {
     .createMenu("Mama Mansion")
     .addItem("📥 Import Horganice Report (XLS)", "importHorganice")
     .addItem('📥 Import Bank CSV (3 บัญชี)', 'importBankCsv')
+    .addItem('🔐 Setup Slip Webhook Trigger', 'installOnEditTriggerRM')
     .addToUi();
 }
 
@@ -684,13 +685,54 @@ function importBankCsv(){
 /***** ====== Manual Slip Received → Receipts_Ledger (Horga_Bills) ====== *****/
 function onEdit(e) {
   try {
-    handleHorgaBillsStatusEdit_(e);
+    // Simple trigger: cannot call services that need explicit auth like UrlFetchApp.
+    // Keep data updates running, but skip webhook from this context.
+    handleHorgaBillsStatusEdit_(e, { sendWebhook: false });
   } catch (err) {
     Logger.log('onEdit error: ' + err);
   }
 }
 
-function handleHorgaBillsStatusEdit_(e) {
+// Installable edit trigger target. This runs with granted OAuth scopes.
+function onEditAuthorizedTM(e) {
+  try {
+    handleHorgaBillsStatusEdit_(e, { sendWebhook: true });
+  } catch (err) {
+    Logger.log('onEditAuthorizedTM error: ' + err);
+  }
+}
+
+// Backward compatibility for previously named handler.
+function onEditAuthorizedRM_(e) {
+  onEditAuthorizedTM(e);
+}
+
+function installOnEditTriggerRM() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const handler = 'onEditAuthorizedTM';
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    const t = triggers[i];
+    if (
+      t.getEventType() === ScriptApp.EventType.ON_EDIT &&
+      t.getHandlerFunction() === handler
+    ) {
+      ScriptApp.deleteTrigger(t);
+    }
+  }
+  ScriptApp.newTrigger(handler).forSpreadsheet(ss).onEdit().create();
+  SpreadsheetApp.getUi().alert('Webhook trigger installed: ' + handler);
+}
+
+// Backward compatibility for previously named setup function.
+function installOnEditTriggerRM_() {
+  installOnEditTriggerRM();
+}
+
+function handleHorgaBillsStatusEdit_(e, options) {
+  const opts = options || {};
+  const sendWebhook = Boolean(opts.sendWebhook);
+
   if (!e || !e.range) return;
   const sh = e.range.getSheet();
   if (sh.getName() !== 'Horga_Bills') return;
@@ -749,21 +791,25 @@ function handleHorgaBillsStatusEdit_(e) {
       sh.getRange(row, cSlip + 1).setValue(slipId);
     }
 
-    sendManualSlipReceivedWebhookRM_({
-      event: 'MANUAL_SLIP_RECEIVED',
-      spreadsheetId: sh.getParent().getId(),
-      sheetName: sh.getName(),
-      row: row,
-      status: statusVal,
-      billId: billId,
-      ym: ym,
-      amountDue: amountDue,
-      account: account,
-      slipId: slipId,
-      previousSlipId: oldSlipId,
-      paidAt: toIsoStringRM_(paidAt),
-      editedAt: new Date().toISOString()
-    });
+    if (sendWebhook) {
+      sendManualSlipReceivedWebhookRM_({
+        event: 'MANUAL_SLIP_RECEIVED',
+        spreadsheetId: sh.getParent().getId(),
+        sheetName: sh.getName(),
+        row: row,
+        status: statusVal,
+        billId: billId,
+        ym: ym,
+        amountDue: amountDue,
+        account: account,
+        slipId: slipId,
+        previousSlipId: oldSlipId,
+        paidAt: toIsoStringRM_(paidAt),
+        editedAt: new Date().toISOString()
+      });
+    } else {
+      Logger.log('Webhook skipped from simple onEdit; use installable trigger onEditAuthorizedTM.');
+    }
 
     if (!billId) {
       Logger.log('Horga_Bills: missing BillID at row ' + row);

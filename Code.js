@@ -1,6 +1,7 @@
 /***** CONFIG: โฟลเดอร์รายงาน Horganice และโฟลเดอร์ Statement CSV *****/
 const HORG_FOLDER_ID = "1aFxmXNgQQKt3gl2Yk-FsQedGTUBnqPMo"; // your folder (Horganice XLS/XLSX)
 const BANK_FOLDER_ID = '1KRfvhgw1Xw26arN_yvj9-_BUKfO-XfJu';  // folder for bank CSVs
+const N8N_MANUAL_SLIP_RECEIVED_WEBHOOK_URL = 'https://n8n.srv1112305.hstgr.cloud/webhook/Manual_Marl_SlipReceived';
 
 /***** เมนูบน Google Sheets *****/
 function onOpen() {
@@ -9,6 +10,52 @@ function onOpen() {
     .addItem("📥 Import Horganice Report (XLS)", "importHorganice")
     .addItem('📥 Import Bank CSV (3 บัญชี)', 'importBankCsv')
     .addToUi();
+}
+
+/***** Web App test endpoint (for curl) *****/
+function doGet(e) {
+  return jsonResponseRM_({
+    ok: true,
+    message: 'Revenue_Master web app is running',
+    now: new Date().toISOString(),
+    query: (e && e.parameter) ? e.parameter : {}
+  });
+}
+
+function doPost(e) {
+  let inbound = {};
+  try {
+    const raw = (e && e.postData && e.postData.contents) ? e.postData.contents : '';
+    inbound = raw ? JSON.parse(raw) : {};
+  } catch (err) {
+    inbound = {
+      raw: (e && e.postData && e.postData.contents) ? String(e.postData.contents) : '',
+      parseError: String(err)
+    };
+  }
+
+  const payload = Object.assign(
+    {
+      event: 'MANUAL_SLIP_RECEIVED_TEST',
+      source: 'APPS_SCRIPT_WEBAPP',
+      receivedAt: new Date().toISOString()
+    },
+    inbound || {}
+  );
+
+  const webhookResult = sendManualSlipReceivedWebhookRM_(payload);
+  return jsonResponseRM_({
+    ok: webhookResult.ok,
+    webhookUrl: N8N_MANUAL_SLIP_RECEIVED_WEBHOOK_URL,
+    webhook: webhookResult,
+    sentPayload: payload
+  });
+}
+
+function jsonResponseRM_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj || {}))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 /***** BILLING CYCLE HELPER (match PAY_RENT: 24th onward = next month) *****/
@@ -677,34 +724,54 @@ function handleHorgaBillsStatusEdit_(e) {
 
     const statusVal = String(sh.getRange(row, statusCol).getValue() || '').trim();
     if (!statusVal) continue;
-    const statusLower = statusVal.toLowerCase();
-    const isSlipReceived =
-      (statusLower.indexOf('slip received') !== -1) ||
-      (statusLower.indexOf('slip recived') !== -1) ||
-      (statusLower.indexOf('รับสลิป') !== -1);
+    const isSlipReceived = isSlipReceivedStatusRM_(statusVal);
     if (!isSlipReceived) continue;
 
     const rowVals = sh.getRange(row, 1, 1, lastCol).getValues()[0];
     const billId = String(rowVals[cBill] || '').trim();
+    const amountDue = toNumber(rowVals[cAmt]);
+    const monthVal = String(rowVals[cMonth] || '').trim();
+    const ym = normalizeYmRM_(monthVal, billId);
+    const oldSlipId = String(rowVals[cSlip] || '').trim();
+    let slipId = oldSlipId;
+    const account = String(rowVals[cAcct] || '').trim();
+    let paidAt = rowVals[cPaidAt] || '';
+
+    if (cPaidAt >= 0) {
+      if (!paidAt) {
+        paidAt = new Date();
+        sh.getRange(row, cPaidAt + 1).setValue(paidAt);
+      }
+    }
+
+    if (cSlip >= 0) {
+      slipId = 'completed';
+      sh.getRange(row, cSlip + 1).setValue(slipId);
+    }
+
+    sendManualSlipReceivedWebhookRM_({
+      event: 'MANUAL_SLIP_RECEIVED',
+      spreadsheetId: sh.getParent().getId(),
+      sheetName: sh.getName(),
+      row: row,
+      status: statusVal,
+      billId: billId,
+      ym: ym,
+      amountDue: amountDue,
+      account: account,
+      slipId: slipId,
+      previousSlipId: oldSlipId,
+      paidAt: toIsoStringRM_(paidAt),
+      editedAt: new Date().toISOString()
+    });
+
     if (!billId) {
       Logger.log('Horga_Bills: missing BillID at row ' + row);
       continue;
     }
-
-    const amountDue = toNumber(rowVals[cAmt]);
     if (amountDue == null || isNaN(amountDue)) {
       Logger.log('Horga_Bills: missing AmountDue for bill ' + billId);
       continue;
-    }
-
-    const monthVal = String(rowVals[cMonth] || '').trim();
-    const ym = normalizeYmRM_(monthVal, billId);
-    const slipId = String(rowVals[cSlip] || '').trim();
-    const account = String(rowVals[cAcct] || '').trim();
-
-    if (cPaidAt >= 0) {
-      const paidAtVal = rowVals[cPaidAt];
-      if (!paidAtVal) sh.getRange(row, cPaidAt + 1).setValue(new Date());
     }
 
     if (receiptLedgerHasEntryRM_(ledger, billId, slipId)) {
@@ -727,6 +794,47 @@ function handleHorgaBillsStatusEdit_(e) {
       note: 'Manual status edit in Horga_Bills'
     });
   }
+}
+
+function isSlipReceivedStatusRM_(statusVal) {
+  const statusLower = String(statusVal || '').toLowerCase();
+  return (
+    (statusLower.indexOf('slip received') !== -1) ||
+    (statusLower.indexOf('slip recived') !== -1) ||
+    (statusLower.indexOf('รับสลิป') !== -1)
+  );
+}
+
+function sendManualSlipReceivedWebhookRM_(payload) {
+  const url = N8N_MANUAL_SLIP_RECEIVED_WEBHOOK_URL;
+  if (!url) return { ok: false, error: 'Webhook URL not configured' };
+  try {
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload || {}),
+      muteHttpExceptions: true
+    });
+    const code = res.getResponseCode();
+    const body = res.getContentText();
+    if (code < 200 || code >= 300) {
+      Logger.log('Manual slip webhook non-2xx: ' + code + ' body=' + body);
+      return { ok: false, statusCode: code, body: body };
+    }
+    return { ok: true, statusCode: code, body: body };
+  } catch (err) {
+    Logger.log('Manual slip webhook error: ' + err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+function toIsoStringRM_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? '' : value.toISOString();
+  }
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? String(value) : d.toISOString();
 }
 
 function getHeadersRM_(sh) {

@@ -300,7 +300,7 @@ function getAccountFromRoom_(roomStr) {
   const floorMatch = roomUpper.match(/^[A-Z]*(\d)/); 
 
   if (floorMatch && floorMatch[1]) {
-    const floorDigit = floorMatch[1]; // This will be '1', '2', '3', '4', or '5'
+    const floorDigit = floorMatch[1]; // This will be '1', '2', '3', '4', '5', or '6'
     
     switch (floorDigit) {
       case '1':
@@ -313,8 +313,10 @@ function getAccountFromRoom_(roomStr) {
         return "GSB";
       case '5':
         return "GSB";
+      case '6':
+        return "NEXT";
       default:
-        return ""; // Floor 0, 6, 7, etc. get no account
+        return ""; // Floor 0, 7, etc. get no account
     }
   }
   

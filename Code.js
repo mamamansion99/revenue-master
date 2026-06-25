@@ -8,6 +8,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Mama Mansion")
     .addItem("📥 Import Horganice Report (XLS)", "importHorganice")
+    .addItem("Backfill Missing Tenant Names", "backfillMissingTenantNames")
     .addItem('📥 Import Bank CSV (3 บัญชี)', 'importBankCsv')
     .addItem('🔐 Setup Slip Webhook Trigger', 'installOnEditTriggerRM')
     .addToUi();
@@ -235,21 +236,38 @@ function importHorganice() {
     const headerOk = SCHEMA.every((h, i) => (firstRow[i] || '') === h);
     if (!headerOk) sh.getRange(1,1,1,SCHEMA.length).setValues([SCHEMA]);
 
-    // build BillID -> rowIndex map (existing)
+    // build BillID -> rowIndex map and room -> tenant fallback from existing rows
     const lastRow = sh.getLastRow();
     const map = new Map();
+    const tenantByBillId = new Map();
+    const tenantByRoom = new Map();
     if (lastRow > 1) {
       const existing = sh.getRange(2,1,lastRow-1,SCHEMA.length).getValues();
       const cBillId = 1; // column A in the sheet = BillID
+      const cRoom = 2;   // column B in the sheet = Room
+      const cTenant = 3; // column C in the sheet = Tenant
       for (let i=0;i<existing.length;i++){
         const id = String(existing[i][cBillId-1]||'').trim();
         if (id) map.set(id, i + 2); // store sheet row index
+        const tenant = String(existing[i][cTenant-1]||'').trim();
+        if (!tenant) continue;
+        if (id) tenantByBillId.set(id, tenant);
+        const room = String(existing[i][cRoom-1]||'').toUpperCase().trim();
+        if (room) tenantByRoom.set(room, tenant);
       }
     }
 
-    let inserted = 0, updated = 0;
+    let inserted = 0, updated = 0, tenantFilled = 0;
     rowsToUpsert.forEach(arr => {
       const billId = String(arr[0]||'').trim();
+      const room = String(arr[1]||'').toUpperCase().trim();
+      if (!String(arr[2]||'').trim()) {
+        const fallbackTenant = tenantByBillId.get(billId) || tenantByRoom.get(room) || '';
+        if (fallbackTenant) {
+          arr[2] = fallbackTenant;
+          tenantFilled++;
+        }
+      }
       const hitRow = map.get(billId);
       if (hitRow) {
         // update in place (full row in schema)
@@ -262,13 +280,64 @@ function importHorganice() {
     });
 
     ui.alert(`Imported ${rowsToUpsert.length} bills from "${latest.getName()}".\n` +
-             `Upserts → inserted: ${inserted}, updated: ${updated}`);
+             `Upserts → inserted: ${inserted}, updated: ${updated}\n` +
+             `Tenant names filled from history: ${tenantFilled}`);
 
   } catch (e) {
     SpreadsheetApp.getUi().alert(`Import failed: ${e}`);
   } finally {
     try { DriveApp.getFileById(tempId).setTrashed(true); } catch (_) {}
   }
+}
+
+function backfillMissingTenantNames() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName("Horga_Bills");
+  if (!sh) return alertOrLog_("Horga_Bills sheet not found.");
+
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  if (lastRow < 2) return alertOrLog_("No Horga_Bills data rows found.");
+
+  const values = sh.getRange(1, 1, lastRow, lastCol).getValues();
+  const header = values[0].map(h => String(h || "").trim());
+  const cRoom = header.indexOf("Room");
+  const cTenant = header.indexOf("Tenant");
+  if (cRoom < 0 || cTenant < 0) {
+    return alertOrLog_("Missing Room or Tenant column in Horga_Bills.");
+  }
+
+  const tenantByRoom = new Map();
+  const writes = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const room = String(row[cRoom] || "").toUpperCase().trim();
+    if (!room) continue;
+
+    const tenant = String(row[cTenant] || "").trim();
+    if (tenant) {
+      tenantByRoom.set(room, tenant);
+      continue;
+    }
+
+    const fallbackTenant = tenantByRoom.get(room);
+    if (fallbackTenant) {
+      writes.push({ row: i + 1, value: fallbackTenant });
+      row[cTenant] = fallbackTenant;
+    }
+  }
+
+  writes.forEach(w => sh.getRange(w.row, cTenant + 1).setValue(w.value));
+  return alertOrLog_(`Tenant names backfilled: ${writes.length}`);
+}
+
+function alertOrLog_(message) {
+  try {
+    SpreadsheetApp.getUi().alert(message);
+  } catch (_) {
+    Logger.log(message);
+  }
+  return message;
 }
 
 /** ===== helpers you already have in your file (kept for clarity) =====

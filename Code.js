@@ -355,7 +355,7 @@ function alertOrLog_(message) {
  * Maps a room number (e.g., "A101", "B305") to an account code based on the floor.
  * Assumes room format is [BuildingLetter(s)][FloorNumber][RoomNumber] e.g., "A101", "B305"
  * @param {string} roomStr - The room number.
- * @returns {string} The corresponding account code (KKK+, TMK+, KGSI, KBIZ) or "".
+ * @returns {string} The corresponding account code for the room floor, or "".
  */
 function getAccountFromRoom_(roomStr) {
   if (!roomStr) return "";
@@ -379,7 +379,7 @@ function getAccountFromRoom_(roomStr) {
       case '3':
         return "KGSI";
       case '4':
-        return "GSB";
+        return "TTB";
       case '5':
         return "GSB";
       case '6':
@@ -635,12 +635,12 @@ function normalizeTxnRow_(row, map, accountCode){
 
 function importBankCsv(){
   const ui = SpreadsheetApp.getUi();
-  const ans = ui.prompt('Import Bank CSV', 'ใส่รหัสบัญชี: KKK+ / KBIZ / KGSI', ui.ButtonSet.OK_CANCEL);
+  const ans = ui.prompt('Import Bank CSV', 'ใส่รหัสบัญชี: KKK+ / KBIZ / KGSI / TTB', ui.ButtonSet.OK_CANCEL);
   if (ans.getSelectedButton() !== ui.Button.OK) return;
   const accountCode = (ans.getResponseText()||'').trim().toUpperCase();
   // ----- CHANGE: Added TMK+ as a valid account code -----
-  if (!/^(KKK\+|KBIZ|KGSI|TMK\+)$/.test(accountCode)) { 
-    ui.alert('รหัสบัญชีไม่ถูกต้อง (ต้องเป็น KKK+, KBIZ, KGSI, หรือ TMK+)'); 
+  if (!/^(KKK\+|KBIZ|KGSI|TMK\+|TTB)$/.test(accountCode)) {
+    ui.alert('รหัสบัญชีไม่ถูกต้อง (ต้องเป็น KKK+, KBIZ, KGSI, TMK+, หรือ TTB)');
     return; 
   }
   // -----------------------------------------------------

@@ -2,6 +2,7 @@
 const HORG_FOLDER_ID = "1aFxmXNgQQKt3gl2Yk-FsQedGTUBnqPMo"; // your folder (Horganice XLS/XLSX)
 const BANK_FOLDER_ID = '1KRfvhgw1Xw26arN_yvj9-_BUKfO-XfJu';  // folder for bank CSVs
 const N8N_MANUAL_SLIP_RECEIVED_WEBHOOK_URL = 'https://n8n.srv1112305.hstgr.cloud/webhook/Manual_Marl_SlipReceived';
+const BANK_ACCOUNT_RULES_SHEET_NAME = 'Bank_Account_Rules';
 
 /***** เมนูบน Google Sheets *****/
 function onOpen() {
@@ -92,6 +93,15 @@ function importHorganice() {
   }
   if (!latest) { ui.alert("No XLS/XLSX report found in the folder."); return; }
 
+  const monthStr = getBillingYmForDate_(new Date(latestTs)); // align with PAY_RENT billing window
+  const accountRuleYmd = `${monthStr}-01`;
+  const accountRulesResult = loadBankAccountRules_();
+  if (!accountRulesResult.ok) {
+    ui.alert(accountRulesResult.message);
+    return;
+  }
+  const bankAccountRules = accountRulesResult.rules;
+
   // 2) convert Excel -> temp Google Sheet (Advanced Drive service must be ON)
   const blob = latest.getBlob();
   const temp = Drive.Files.insert(
@@ -157,8 +167,8 @@ function importHorganice() {
     }
 
     // 6) build output rows (NO clearing — we will upsert)
-    const monthStr = getBillingYmForDate_(new Date(latestTs)); // align with PAY_RENT billing window
     const rowsToUpsert = []; // each is an array in the schema below
+    const accountRuleProblems = new Set();
 
     // schema
     const SCHEMA = ['BillID','Room','Tenant','Month','Type','AmountDue','DueDate',
@@ -204,7 +214,9 @@ function importHorganice() {
       if (!hasAny) continue;
 
       const dueStr  = idxDue >= 0 ? formatAsDateString(row[idxDue]) : "";
-      const account = getAccountFromRoom_(room);  // keep your original logic
+      const accountResult = getAccountFromRoomRule_(room, accountRuleYmd, bankAccountRules);
+      const account = accountResult.account;
+      if (!account) accountRuleProblems.add(accountResult.message);
       const billId  = `${monthStr}-${room}`;
 
       rowsToUpsert.push([
@@ -224,6 +236,15 @@ function importHorganice() {
         chargeParts.join('; '),
         `Imported: ${latest.getName()}`
       ]);
+    }
+
+    if (accountRuleProblems.size > 0) {
+      ui.alert(
+        `Import stopped: missing or invalid ${BANK_ACCOUNT_RULES_SHEET_NAME} account rules for billing month ${monthStr}.\n\n` +
+        Array.from(accountRuleProblems).slice(0, 15).join('\n') +
+        (accountRuleProblems.size > 15 ? `\n...and ${accountRuleProblems.size - 15} more.` : '')
+      );
+      return;
     }
 
     // 7) Upsert into Horga_Bills
@@ -276,14 +297,178 @@ function importHorganice() {
  *  - toStr(v)
  *  - toNumber(v)
  *  - formatAsDateString(v)
- *  - getAccountFromRoom_(room)
+ *  - getAccountFromRoomRule_(room, effectiveYmd, rules)
  *  Keep using your existing versions; no changes needed.
  */
 
 
-/***** NEW HELPER FUNCTION *****/
+/***** BANK ACCOUNT RULE HELPERS *****/
+function loadBankAccountRules_() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(BANK_ACCOUNT_RULES_SHEET_NAME);
+  if (!sh) {
+    return {
+      ok: false,
+      message: `Missing sheet "${BANK_ACCOUNT_RULES_SHEET_NAME}". Please import the bank account rule template first.`
+    };
+  }
+
+  const values = sh.getDataRange().getValues();
+  if (!values || values.length < 2) {
+    return {
+      ok: false,
+      message: `Sheet "${BANK_ACCOUNT_RULES_SHEET_NAME}" has no rule rows.`
+    };
+  }
+
+  const headers = values[0].map(h => normalizeHeaderName_(h));
+  const cFrom = findHeaderNameIndex_(headers, ['effectivefrom', 'from', 'startdate', 'start']);
+  const cTo = findHeaderNameIndex_(headers, ['effectiveto', 'to', 'enddate', 'end']);
+  const cFloor = findHeaderNameIndex_(headers, ['floor']);
+  const cAccount = findHeaderNameIndex_(headers, ['accountcode', 'account']);
+
+  if (cFrom < 0 || cTo < 0 || cFloor < 0 || cAccount < 0) {
+    return {
+      ok: false,
+      message: `Sheet "${BANK_ACCOUNT_RULES_SHEET_NAME}" must have columns: EffectiveFrom, EffectiveTo, Floor, AccountCode.`
+    };
+  }
+
+  const rules = [];
+  const errors = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const empty = row.every(v => String(v == null ? '' : v).trim() === '');
+    if (empty) continue;
+
+    const effectiveFrom = toRuleYmd_(row[cFrom]);
+    const effectiveTo = toRuleYmd_(row[cTo]);
+    const floor = toFloorKey_(row[cFloor]);
+    const accountCode = String(row[cAccount] == null ? '' : row[cAccount]).trim().toUpperCase();
+
+    if (!effectiveFrom || !effectiveTo || !floor) {
+      errors.push(`Row ${i + 1}: EffectiveFrom, EffectiveTo, and Floor are required.`);
+      continue;
+    }
+    if (!accountCode) {
+      continue;
+    }
+    if (effectiveFrom > effectiveTo) {
+      errors.push(`Row ${i + 1}: EffectiveFrom is after EffectiveTo.`);
+      continue;
+    }
+
+    rules.push({ effectiveFrom, effectiveTo, floor, accountCode, rowNumber: i + 1 });
+  }
+
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      message:
+        `Please fix "${BANK_ACCOUNT_RULES_SHEET_NAME}" before importing.\n\n` +
+        errors.slice(0, 15).join('\n') +
+        (errors.length > 15 ? `\n...and ${errors.length - 15} more.` : '')
+    };
+  }
+  if (rules.length === 0) {
+    return {
+      ok: false,
+      message: `Sheet "${BANK_ACCOUNT_RULES_SHEET_NAME}" has no valid rule rows.`
+    };
+  }
+
+  return { ok: true, rules };
+}
+
+function getAccountFromRoomRule_(roomStr, effectiveYmd, rules) {
+  const floor = getFloorFromRoom_(roomStr);
+  if (!floor) {
+    return {
+      account: '',
+      message: `Room "${roomStr}": cannot determine floor.`
+    };
+  }
+
+  const matches = (rules || []).filter(rule =>
+    rule.floor === floor &&
+    rule.effectiveFrom <= effectiveYmd &&
+    effectiveYmd <= rule.effectiveTo
+  );
+
+  if (matches.length === 0) {
+    return {
+      account: '',
+      message: `Floor ${floor}: no rule covers ${effectiveYmd}.`
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      account: '',
+      message: `Floor ${floor}: multiple rules cover ${effectiveYmd} (rows ${matches.map(r => r.rowNumber).join(', ')}).`
+    };
+  }
+
+  return { account: matches[0].accountCode, message: '' };
+}
+
+function getKnownBankAccountCodes_() {
+  const result = loadBankAccountRules_();
+  const codes = new Set();
+  if (result.ok) {
+    result.rules.forEach(rule => {
+      if (rule.accountCode) codes.add(rule.accountCode);
+    });
+  }
+
+  getDefaultBankAccountCodes_().forEach(code => codes.add(code));
+  return Array.from(codes).sort();
+}
+
+function getDefaultBankAccountCodes_() {
+  return ['KKK+', 'MAK+', 'KGSI', 'GSB', 'NEXT', 'KBIZ', 'TMK+'];
+}
+
+function getFloorFromRoom_(roomStr) {
+  const roomUpper = String(roomStr || '').toUpperCase().trim();
+  const floorMatch = roomUpper.match(/^[A-Z]*(\d)/);
+  return floorMatch && floorMatch[1] ? floorMatch[1] : '';
+}
+
+function toFloorKey_(v) {
+  const m = String(v == null ? '' : v).trim().match(/\d+/);
+  return m ? m[0] : '';
+}
+
+function normalizeHeaderName_(v) {
+  return String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function findHeaderNameIndex_(headers, names) {
+  for (let i = 0; i < headers.length; i++) {
+    if (names.indexOf(headers[i]) >= 0) return i;
+  }
+  return -1;
+}
+
+function toRuleYmd_(v) {
+  if (!v) return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (m) return `${m[1]}-${('0' + m[2]).slice(-2)}-${('0' + m[3]).slice(-2)}`;
+
+  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (m) return `${m[3]}-${('0' + m[2]).slice(-2)}-${('0' + m[1]).slice(-2)}`;
+
+  return '';
+}
+
 /**
  * Maps a room number (e.g., "A101", "B305") to an account code based on the floor.
+ * Kept as a hardcoded fallback for older code paths; Horganice import uses Bank_Account_Rules.
  * Assumes room format is [BuildingLetter(s)][FloorNumber][RoomNumber] e.g., "A101", "B305"
  * @param {string} roomStr - The room number.
  * @returns {string} The corresponding account code (KKK+, TMK+, KGSI, KBIZ) or "".
@@ -291,17 +476,9 @@ function importHorganice() {
 function getAccountFromRoom_(roomStr) {
   if (!roomStr) return "";
   
-  const roomUpper = String(roomStr).toUpperCase().trim();
-  
-  // This regex looks for optional letters at the start, followed by ONE digit.
-  // This digit is assumed to be the floor.
-  // ^[A-Z]* -> Optional letters (A, B, AB, etc.) at the start.
-  // (\d)      -> Captures the single digit that follows.
-  const floorMatch = roomUpper.match(/^[A-Z]*(\d)/); 
+  const floorDigit = getFloorFromRoom_(roomStr);
 
-  if (floorMatch && floorMatch[1]) {
-    const floorDigit = floorMatch[1]; // This will be '1', '2', '3', '4', '5', or '6'
-    
+  if (floorDigit) {
     switch (floorDigit) {
       case '1':
         return "KKK+";
@@ -566,15 +743,14 @@ function normalizeTxnRow_(row, map, accountCode){
 
 function importBankCsv(){
   const ui = SpreadsheetApp.getUi();
-  const ans = ui.prompt('Import Bank CSV', 'ใส่รหัสบัญชี: KKK+ / KBIZ / KGSI', ui.ButtonSet.OK_CANCEL);
+  const validAccountCodes = getKnownBankAccountCodes_();
+  const ans = ui.prompt('Import Bank CSV', `ใส่รหัสบัญชี: ${validAccountCodes.join(' / ')}`, ui.ButtonSet.OK_CANCEL);
   if (ans.getSelectedButton() !== ui.Button.OK) return;
   const accountCode = (ans.getResponseText()||'').trim().toUpperCase();
-  // ----- CHANGE: Added TMK+ as a valid account code -----
-  if (!/^(KKK\+|KBIZ|KGSI|TMK\+)$/.test(accountCode)) { 
-    ui.alert('รหัสบัญชีไม่ถูกต้อง (ต้องเป็น KKK+, KBIZ, KGSI, หรือ TMK+)'); 
+  if (validAccountCodes.indexOf(accountCode) < 0) {
+    ui.alert(`รหัสบัญชีไม่ถูกต้อง (ต้องเป็น ${validAccountCodes.join(', ')})`);
     return; 
   }
-  // -----------------------------------------------------
 
   const file = pickLatestCsv_(BANK_FOLDER_ID);
   if (!file){ ui.alert('ไม่พบไฟล์ .csv ในโฟลเดอร์'); return; }

@@ -182,6 +182,9 @@ function importHorganice() {
       // Skip subtotal rows
       if (/^รวม|total|summary/i.test(room)) continue;
 
+      // Skip parking slots (P01, P02, ...) — handled by the vehicle/sticker system, not Horga_Bills
+      if (/^P\d+$/i.test(room)) continue;
+
       const tenant = idxTenant >= 0 ? toStr(row[idxTenant]) : "";
 
       let amountDue = 0;
@@ -908,6 +911,30 @@ function installOnEditTriggerRM_() {
 }
 
 function handleHorgaBillsStatusEdit_(e, options) {
+  if (!e || !e.range) return;
+  const sh = e.range.getSheet();
+  if (sh.getName() !== 'Horga_Bills') return;
+
+  // One edit fires two handlers: the simple onEdit and the installable
+  // onEditAuthorizedTM trigger. They run concurrently, so both read
+  // Receipts_Ledger before either appends, receiptLedgerHasEntryRM_ returns
+  // false for both, and the receipt lands twice. Serialise them here.
+  const lock = LockService.getDocumentLock();
+  try {
+    lock.waitLock(30000);
+  } catch (err) {
+    Logger.log('handleHorgaBillsStatusEdit_: lock not acquired, skipping: ' + err);
+    return;
+  }
+  try {
+    handleHorgaBillsStatusEditLocked_(e, options);
+  } finally {
+    SpreadsheetApp.flush();
+    lock.releaseLock();
+  }
+}
+
+function handleHorgaBillsStatusEditLocked_(e, options) {
   const opts = options || {};
   const sendWebhook = Boolean(opts.sendWebhook);
 

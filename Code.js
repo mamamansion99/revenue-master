@@ -182,8 +182,8 @@ function importHorganice() {
       // Skip subtotal rows
       if (/^รวม|total|summary/i.test(room)) continue;
 
-      // Skip parking slots (P01, P02, ...) — handled by the vehicle/sticker system, not Horga_Bills
-      if (/^P\d+$/i.test(room)) continue;
+      // Skip parking slots (P01, M01, ...) — handled by the vehicle/sticker system, not Horga_Bills
+      if (/^[PM]\d+$/i.test(room)) continue;
 
       const tenant = idxTenant >= 0 ? toStr(row[idxTenant]) : "";
 

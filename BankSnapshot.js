@@ -103,10 +103,31 @@ function loadAccountConfigMap_(ss) {
     map[code] = {
       accountNo: String(r[ix('AccountNo')] || '').trim(),
       bankLabel: String(r[ix('BankLabel')] || '').trim(),
-      purpose: String(r[ix('Purpose')] || '').trim()
+      purpose: String(r[ix('Purpose')] || '').trim(),
+      owner: ix('Owner') >= 0 ? String(r[ix('Owner')] || '').trim().toUpperCase() : ''
     };
   });
   return map;
+}
+
+// _Config_Owners: Owner | LineUserId | Active — คนดูแลบัญชี (บัญชีไหนของใครอยู่ที่ _Config_Accounts.Owner)
+function loadSnapshotOwners_(ss) {
+  const sh = ss.getSheetByName('_Config_Owners');
+  if (!sh) return [];
+  const v = sh.getDataRange().getValues();
+  const h = v[0].map(function (x) { return String(x).trim(); });
+  const ix = function (k) { return h.indexOf(k); };
+  return v.slice(1).map(function (r) {
+    return {
+      owner: String(r[ix('Owner')] || '').trim().toUpperCase(),
+      lineUserId: String(r[ix('LineUserId')] || '').trim(),
+      active: String(r[ix('Active')]).toUpperCase() !== 'FALSE'
+    };
+  }).filter(function (o) { return o.owner && o.active; });
+}
+
+function normalizeSnapshotOwner_(owner) {
+  return String(owner || '').trim().toUpperCase();
 }
 
 // เงินเข้าที่ระบบเห็นแล้วหลังสิ้นวัน asOf (ใช้เตือนตอนจดเช้าวันที่ 25 ว่ายอดปัจจุบันจะเกินไปเท่าไร)
@@ -132,8 +153,10 @@ function ledgerInAfter_(ss, asOfYmd) {
   return out;
 }
 
-function buildSnapshotState_(asOf) {
+// owner ว่าง = ทุกบัญชี, ใส่ owner = เฉพาะบัญชีของคนนั้น (ตาม _Config_Accounts.Owner)
+function buildSnapshotState_(asOf, owner) {
   const asOfYmd = normalizeSnapshotAsOf_(asOf);
+  const ownerKey = normalizeSnapshotOwner_(owner);
   const cycle = asOfYmd.slice(0, 7);
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(SNAPSHOT_SHEET_NAME);
@@ -144,7 +167,12 @@ function buildSnapshotState_(asOf) {
   const afterAsOf = nowYmd > asOfYmd;
   const ledgerAfter = afterAsOf ? ledgerInAfter_(ss, asOfYmd) : {};
 
-  const accounts = acc.codes.map(function (code) {
+  if (ownerKey && !acc.codes.some(function (code) { return (cfg[code] || {}).owner === ownerKey; })) {
+    throw new Error('ไม่มีบัญชีของ ' + ownerKey);
+  }
+  const accounts = acc.codes.filter(function (code) {
+    return !ownerKey || (cfg[code] || {}).owner === ownerKey;
+  }).map(function (code) {
     const c = cfg[code] || {};
     const cur = rows.filter(function (r) { return r.month === cycle && r.account === code; })[0];
     const last = rows.filter(function (r) {
@@ -152,6 +180,7 @@ function buildSnapshotState_(asOf) {
     }).pop();
     return {
       code: code,
+      owner: c.owner || '',
       bankLabel: c.bankLabel || '',
       purpose: c.purpose || '',
       last4: c.accountNo ? c.accountNo.slice(-4) : '',
@@ -166,6 +195,7 @@ function buildSnapshotState_(asOf) {
   return {
     asOf: asOfYmd,
     cycle: cycle,
+    owner: ownerKey,
     prevCycle: acc.prevCycle,
     now: Utilities.formatDate(new Date(), snapshotTz_(), 'yyyy-MM-dd HH:mm'),
     afterAsOf: afterAsOf,
@@ -197,14 +227,27 @@ function bankSnapshotStatus_(e) {
   try {
     const s = buildSnapshotState_(p.asOf);
     // จดภายในวัน asOf เอง = อาจมีเงินเข้า-ออกหลังเวลาที่จดก่อนเที่ยงคืน ต้องให้ยืนยันยอดสิ้นวันอีกรอบ
-    const sameDay = s.accounts
-      .filter(function (a) { return a.saved !== null && String(a.savedAt).slice(0, 10) === s.asOf; })
-      .map(function (a) { return { code: a.code, at: String(a.savedAt).slice(11) }; });
-    return jsonResponseRM_({
-      ok: true, asOf: s.asOf, cycle: s.cycle, expected: s.expected,
-      savedCount: s.savedCount, missing: s.missing, complete: s.complete,
-      capturedSameDay: sameDay
-    });
+    const summarize = function (accounts) {
+      const missing = accounts.filter(function (a) { return a.saved === null; }).map(function (a) { return a.code; });
+      return {
+        expected: accounts.length,
+        savedCount: accounts.length - missing.length,
+        missing: missing,
+        complete: accounts.length > 0 && missing.length === 0,
+        capturedSameDay: accounts
+          .filter(function (a) { return a.saved !== null && String(a.savedAt).slice(0, 10) === s.asOf; })
+          .map(function (a) { return { code: a.code, at: String(a.savedAt).slice(11) }; })
+      };
+    };
+    const owners = loadSnapshotOwners_(SpreadsheetApp.getActiveSpreadsheet()).map(function (o) {
+      return Object.assign({ owner: o.owner, lineUserId: o.lineUserId },
+        summarize(s.accounts.filter(function (a) { return a.owner === o.owner; })));
+    }).filter(function (o) { return o.expected > 0; });
+    const unassigned = s.accounts.filter(function (a) {
+      return !owners.some(function (o) { return o.owner === a.owner; });
+    }).map(function (a) { return a.code; });
+    return jsonResponseRM_(Object.assign({ ok: true, asOf: s.asOf, cycle: s.cycle },
+      summarize(s.accounts), { owners: owners, unassigned: unassigned }));
   } catch (err) {
     return jsonResponseRM_({ ok: false, error: String(err && err.message || err) });
   }
@@ -219,9 +262,9 @@ function bankSnapshotApiGet_(e) {
   try {
     // บันทึกผ่าน GET: Safari อ่านผลของ POST ที่ Apps Script redirect ต่อไม่ได้ (ข้อมูลลงชีทแล้วแต่หน้าเว็บขึ้น error)
     if (p.action === 'save') {
-      return jsonResponseRM_({ ok: true, state: saveBankSnapshot(p.t, p.asOf, JSON.parse(p.entries || '[]')) });
+      return jsonResponseRM_({ ok: true, state: saveBankSnapshot(p.t, p.asOf, JSON.parse(p.entries || '[]'), p.owner) });
     }
-    return jsonResponseRM_({ ok: true, state: getBankSnapshotForm(p.t, p.asOf) });
+    return jsonResponseRM_({ ok: true, state: getBankSnapshotForm(p.t, p.asOf, p.owner) });
   } catch (err) {
     return jsonResponseRM_({ ok: false, error: String(err && err.message || err) });
   }
@@ -237,20 +280,21 @@ function bankSnapshotApiPost_(e) {
   }
   if (!body || body.action !== 'snapshot-save') return null;
   try {
-    return jsonResponseRM_({ ok: true, state: saveBankSnapshot(body.t, body.asOf, body.entries) });
+    return jsonResponseRM_({ ok: true, state: saveBankSnapshot(body.t, body.asOf, body.entries, body.owner) });
   } catch (err) {
     return jsonResponseRM_({ ok: false, error: String(err && err.message || err) });
   }
 }
 
 /***** เรียกจากหน้าเว็บผ่าน google.script.run *****/
-function getBankSnapshotForm(token, asOf) {
+function getBankSnapshotForm(token, asOf, owner) {
   if (!snapshotTokenOk_(token)) throw new Error('unauthorized');
-  return buildSnapshotState_(asOf);
+  return buildSnapshotState_(asOf, owner);
 }
 
 // entries: [{code, amount}] — amount ว่าง = ข้าม (ยังไม่จด), จดซ้ำ = แก้แถวเดิมของรอบนี้
-function saveBankSnapshot(token, asOf, entries) {
+// owner: ถ้าใส่มา บันทึกได้เฉพาะบัญชีของคนนั้น
+function saveBankSnapshot(token, asOf, entries, owner) {
   if (!snapshotTokenOk_(token)) throw new Error('unauthorized');
   const asOfYmd = normalizeSnapshotAsOf_(asOf);
   const cycle = asOfYmd.slice(0, 7);
@@ -269,7 +313,11 @@ function saveBankSnapshot(token, asOf, entries) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sh = ss.getSheetByName(SNAPSHOT_SHEET_NAME);
     const rows = readSnapshotRows_(sh);
-    const allowed = snapshotAccountsFor_(rows, cycle).codes;
+    const ownerKey = normalizeSnapshotOwner_(owner);
+    const cfg = ownerKey ? loadAccountConfigMap_(ss) : {};
+    const allowed = snapshotAccountsFor_(rows, cycle).codes.filter(function (code) {
+      return !ownerKey || (cfg[code] || {}).owner === ownerKey;
+    });
     const openingDate = snapshotDateFromYmd_(asOfYmd);
     const now = new Date();
     let lastUsed = SNAPSHOT_FIRST_ROW - 1;
@@ -277,7 +325,7 @@ function saveBankSnapshot(token, asOf, entries) {
     let nextRow = lastUsed + 1;
 
     clean.forEach(function (x) {
-      if (allowed.indexOf(x.code) < 0) throw new Error('ไม่รู้จักบัญชี ' + x.code);
+      if (allowed.indexOf(x.code) < 0) throw new Error('ไม่รู้จักบัญชี ' + x.code + (ownerKey ? ' ในรายการของ ' + ownerKey : ''));
       const cur = rows.filter(function (r) { return r.month === cycle && r.account === x.code; })[0];
       let row;
       if (cur) {
@@ -289,15 +337,17 @@ function saveBankSnapshot(token, asOf, entries) {
         sh.getRange(row, 1).setNumberFormat('@').setValue(cycle);
         sh.getRange(row, 2).setValue(x.code);
         sh.getRange(row, 5).setFormula('=IF(D' + row + '="","",D' + row + '-C' + row + ')');
+        sh.getRange(row, 6).setNumberFormat('yyyy-mm-dd');
+        sh.getRange(row, 8).setNumberFormat('yyyy-mm-dd hh:mm');
       }
+      // แถวที่เติมไว้ล่วงหน้ามีรูปแบบวันที่อยู่แล้ว เขียนแค่ค่า (ข้าม D=Close, E=Net, G=EndingDate)
       sh.getRange(row, 3).setValue(x.amount);
-      sh.getRange(row, 6).setValue(openingDate).setNumberFormat('yyyy-mm-dd');
-      sh.getRange(row, 8).setValue(now).setNumberFormat('yyyy-mm-dd hh:mm');
-      sh.getRange(row, 9).setValue(SNAPSHOT_STATUS);
+      sh.getRange(row, 6).setValue(openingDate);
+      sh.getRange(row, 8, 1, 2).setValues([[now, SNAPSHOT_STATUS]]);
     });
     SpreadsheetApp.flush();
   } finally {
     lock.releaseLock();
   }
-  return buildSnapshotState_(asOfYmd);
+  return buildSnapshotState_(asOfYmd, owner);
 }

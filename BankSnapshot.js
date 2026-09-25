@@ -137,7 +137,10 @@ function ledgerInAfter_(ss, asOfYmd) {
   if (!sh) return out;
   const p = asOfYmd.split('-').map(Number);
   const cutoffSerial = (Date.UTC(p[0], p[1] - 1, p[2]) - Date.UTC(1899, 11, 30)) / 86400000;
-  const v = sh.getRange('A2:L5003').getValues();
+  // อ่านเฉพาะแถวที่มีข้อมูล (สูตรในชีทยาวถึง 5003 แต่ ledger จริงสั้นกว่ามาก) — ลดเวลาโหลดหน้าเว็บ
+  const ledger = ss.getSheetByName('Receipts_Ledger');
+  const n = Math.min(5002, Math.max(1, (ledger ? ledger.getLastRow() : 5003) - 1));
+  const v = sh.getRange(2, 1, n, 12).getValues();
   v.forEach(function (r) {
     const d = r[0], acct = String(r[2] || '').trim();
     if (!acct || r[3] !== 'IN' || r[11] !== true) return;
@@ -183,6 +186,7 @@ function buildSnapshotState_(asOf, owner) {
       owner: c.owner || '',
       bankLabel: c.bankLabel || '',
       purpose: c.purpose || '',
+      accountNo: c.accountNo || '',
       last4: c.accountNo ? c.accountNo.slice(-4) : '',
       saved: cur && cur.open !== '' ? Number(cur.open) : null,
       savedAt: cur ? cur.capturedAt : '',

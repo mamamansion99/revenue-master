@@ -16,6 +16,9 @@ function onOpen() {
 
 /***** Web App test endpoint (for curl) *****/
 function doGet(e) {
+  const page = e && e.parameter && e.parameter.page;
+  if (page === 'snapshot') return bankSnapshotPage_(e);
+  if (page === 'snapshot-status') return bankSnapshotStatus_(e);
   return jsonResponseRM_({
     ok: true,
     message: 'Revenue_Master web app is running',

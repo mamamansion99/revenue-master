@@ -210,6 +210,35 @@ function bankSnapshotStatus_(e) {
   }
 }
 
+/***** JSON API สำหรับหน้าเว็บบน Cloudflare Pages (mm-bank-snapshot.pages.dev)
+ * หน้าเว็บ Apps Script เปิดไม่ได้เมื่อเบราว์เซอร์ล็อกอิน Google หลายบัญชี (Google แทรก /u/1/ ใน URL)
+ * หน้า Pages เรียก API นี้ด้วย fetch แบบไม่ส่ง cookie จึงไม่โดน
+ *****/
+function bankSnapshotApiGet_(e) {
+  const p = (e && e.parameter) || {};
+  try {
+    return jsonResponseRM_({ ok: true, state: getBankSnapshotForm(p.t, p.asOf) });
+  } catch (err) {
+    return jsonResponseRM_({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
+// คืน null ถ้าไม่ใช่คำขอของ snapshot เพื่อให้ doPost ทำงานแบบเดิมต่อ
+function bankSnapshotApiPost_(e) {
+  let body;
+  try {
+    body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+  } catch (err) {
+    return null;
+  }
+  if (!body || body.action !== 'snapshot-save') return null;
+  try {
+    return jsonResponseRM_({ ok: true, state: saveBankSnapshot(body.t, body.asOf, body.entries) });
+  } catch (err) {
+    return jsonResponseRM_({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
 /***** เรียกจากหน้าเว็บผ่าน google.script.run *****/
 function getBankSnapshotForm(token, asOf) {
   if (!snapshotTokenOk_(token)) throw new Error('unauthorized');

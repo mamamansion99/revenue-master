@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>จดยอดบัญชี</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --mute:#6b7280; --line:#e5e7eb; --ok:#15803d; --warn:#b45309; --warnbg:#fff7ed; --accent:#1d4ed8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:16px 16px 96px; }
+  h1 { font-size:20px; margin:4px 0 2px; }
+  .sub { color:var(--mute); font-size:13px; }
+  .note { background:var(--warnbg); border:1px solid #fed7aa; color:#7c2d12; border-radius:10px; padding:10px 12px; margin:12px 0; font-size:14px; }
+  .note.info { background:#eff6ff; border-color:#bfdbfe; color:#1e3a8a; }
+  .row { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:8px 0; }
+  .top { display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
+  .code { font-weight:700; }
+  .bank { color:var(--mute); font-size:12px; }
+  .done { color:var(--ok); font-size:12px; white-space:nowrap; }
+  input { width:100%; margin-top:6px; padding:10px 12px; font-size:18px; border:1px solid #cbd5e1; border-radius:8px; text-align:right; font-variant-numeric:tabular-nums; }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  .hint { color:var(--mute); font-size:12px; margin-top:4px; }
+  .hint.warn { color:var(--warn); }
+  .bar { position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:10px 16px; }
+  .bar div { max-width:560px; margin:0 auto; display:flex; gap:10px; align-items:center; }
+  button { flex:1; padding:12px; font-size:16px; font-weight:600; border:0; border-radius:10px; background:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; }
+  #msg { font-size:13px; flex:1.3; }
+  .dateline { display:flex; gap:8px; align-items:center; margin-top:8px; font-size:13px; color:var(--mute); }
+  .dateline input { width:auto; font-size:14px; padding:4px 8px; margin:0; text-align:left; }
+</style>
+</head>
+<body>
+<main>
+  <h1>จดยอดบัญชีก่อนส่งบิล</h1>
+  <div class="sub" id="sub">กำลังโหลด…</div>
+  <div class="dateline">ยอด ณ สิ้นวันที่ <input type="date" id="asOf"></div>
+  <div id="notes"></div>
+  <div id="list"></div>
+</main>
+<div class="bar"><div><span id="msg"></span><button id="save" disabled>บันทึก</button></div></div>
+
+<script>
+  // API = web app ของ Revenue Master (Apps Script) — เรียกแบบไม่ส่ง cookie กัน Google แทรก /u/1/
+  var API = 'https://script.google.com/macros/s/AKfycbxLXVbQXxcYocLXGDVUEO5aGU6EFX1kuQU0iGEM4VpSsyLm4Dn13PspoiY9-2KgGhcF/exec';
+  var params = new URLSearchParams(location.search);
+  var TOKEN = params.get('t') || '';
+  var state = null;
+
+  function api(method, query, body) {
+    var url = API + (query ? '?' + new URLSearchParams(query).toString() : '');
+    var opt = { method: method, credentials: 'omit', redirect: 'follow' };
+    if (body) opt.body = JSON.stringify(body); // text/plain = ไม่มี preflight
+    return fetch(url, opt)
+      .then(function (r) { return r.json(); })
+      .then(function (res) { if (!res.ok) throw new Error(res.error || 'ไม่ทราบสาเหตุ'); return res.state; });
+  }
+
+  function fmt(n) { return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function thDate(ymd) {
+    if (!ymd) return '';
+    var m = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    var p = String(ymd).split('-');
+    return p.length < 3 ? ymd : (Number(p[2]) + ' ' + m[Number(p[1]) - 1]);
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]; }); }
+
+  function render(s) {
+    state = s;
+    document.getElementById('asOf').value = s.asOf;
+    document.getElementById('sub').textContent =
+      'รอบ ' + s.cycle + ' · จดแล้ว ' + s.savedCount + '/' + s.expected + ' บัญชี · ตอนนี้ ' + s.now;
+
+    var notes = '';
+    if (s.afterAsOf) {
+      notes += '<div class="note">ตอนนี้เลยวันที่ ' + thDate(s.asOf) + ' แล้ว — <b>อย่าใช้ยอดคงเหลือปัจจุบัน</b> ' +
+        'ให้เปิดรายการเดินบัญชีในแอปธนาคาร แล้วกรอก <b>ยอดคงเหลือหลังรายการสุดท้ายของวันที่ ' + thDate(s.asOf) + '</b></div>';
+    } else {
+      notes += '<div class="note info">กรอกยอดคงเหลือตอนนี้ได้เลย — ถ้ามีเงินเข้า-ออกอีกก่อนเที่ยงคืน ' +
+        'ให้เปิดลิงก์นี้พรุ่งนี้เช้าแล้วแก้เป็นยอดหลังรายการสุดท้ายของวันที่ ' + thDate(s.asOf) + '</div>';
+    }
+    document.getElementById('notes').innerHTML = notes;
+
+    document.getElementById('list').innerHTML = s.accounts.map(function (a) {
+      var hints = [];
+      if (a.lastClose != null) hints.push('ยอดปิดรอบก่อน (' + thDate(a.lastCloseDate) + ') ' + fmt(a.lastClose));
+      var warn = '';
+      if (a.ledgerAfter) {
+        warn = '<div class="hint warn">ระบบเห็นเงินเข้าหลังวันที่ ' + thDate(s.asOf) + ' แล้ว ' +
+          a.ledgerAfter.count + ' รายการ ' + fmt(a.ledgerAfter.amount) + ' — ถ้ากรอกยอดปัจจุบันจะเกินไปประมาณนี้</div>';
+      }
+      return '<div class="row">' +
+        '<div class="top"><div><span class="code">' + esc(a.code) + '</span> ' +
+        '<span class="bank">' + esc(a.bankLabel) + (a.last4 ? ' ···' + esc(a.last4) : '') + ' · ' + esc(a.purpose) + '</span></div>' +
+        (a.saved != null ? '<span class="done">✓ ' + esc((a.savedAt || '').slice(5)) + '</span>' : '') + '</div>' +
+        '<input inputmode="decimal" autocomplete="off" data-code="' + esc(a.code) + '" placeholder="ยอดคงเหลือ" value="' +
+        (a.saved != null ? fmt(a.saved) : '') + '">' +
+        '<div class="hint">' + hints.join(' · ') + '</div>' + warn +
+        '</div>';
+    }).join('');
+    document.getElementById('save').disabled = false;
+  }
+
+  function load(asOf) {
+    document.getElementById('save').disabled = true;
+    document.getElementById('msg').textContent = '';
+    api('GET', { page: 'snapshot-api', t: TOKEN, asOf: asOf || '' })
+      .then(render)
+      .catch(function (e) { document.getElementById('sub').textContent = 'โหลดไม่สำเร็จ: ' + e.message; });
+  }
+
+  document.getElementById('asOf').addEventListener('change', function () { load(this.value); });
+
+  document.getElementById('save').addEventListener('click', function () {
+    var inputs = document.querySelectorAll('input[data-code]');
+    var entries = [], bad = [];
+    inputs.forEach(function (el) {
+      var raw = el.value.replace(/[,\s฿]/g, '');
+      if (raw === '') return;
+      if (!isFinite(Number(raw))) bad.push(el.dataset.code);
+      entries.push({ code: el.dataset.code, amount: raw });
+    });
+    var msg = document.getElementById('msg');
+    if (bad.length) { msg.textContent = 'ไม่ใช่ตัวเลข: ' + bad.join(', '); return; }
+    if (!entries.length) { msg.textContent = 'ยังไม่ได้กรอกยอด'; return; }
+    var btn = this;
+    btn.disabled = true;
+    msg.textContent = 'กำลังบันทึก…';
+    api('POST', null, { action: 'snapshot-save', t: TOKEN, asOf: state.asOf, entries: entries })
+      .then(function (s) {
+        render(s);
+        document.getElementById('msg').textContent = s.complete
+          ? '✓ บันทึกครบ ' + s.expected + ' บัญชีแล้ว ส่งบิลได้'
+          : 'บันทึกแล้ว ยังขาด: ' + s.missing.join(', ');
+      })
+      .catch(function (e) { btn.disabled = false; msg.textContent = 'บันทึกไม่สำเร็จ: ' + e.message; });
+  });
+
+  load(params.get('asOf') || '');
+</script>
+</body>
+</html>

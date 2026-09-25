@@ -217,6 +217,10 @@ function bankSnapshotStatus_(e) {
 function bankSnapshotApiGet_(e) {
   const p = (e && e.parameter) || {};
   try {
+    // บันทึกผ่าน GET: Safari อ่านผลของ POST ที่ Apps Script redirect ต่อไม่ได้ (ข้อมูลลงชีทแล้วแต่หน้าเว็บขึ้น error)
+    if (p.action === 'save') {
+      return jsonResponseRM_({ ok: true, state: saveBankSnapshot(p.t, p.asOf, JSON.parse(p.entries || '[]')) });
+    }
     return jsonResponseRM_({ ok: true, state: getBankSnapshotForm(p.t, p.asOf) });
   } catch (err) {
     return jsonResponseRM_({ ok: false, error: String(err && err.message || err) });

@@ -54,8 +54,13 @@
     var opt = { method: method, credentials: 'omit', redirect: 'follow' };
     if (body) opt.body = JSON.stringify(body); // text/plain = ไม่มี preflight
     return fetch(url, opt)
-      .then(function (r) { return r.json(); })
-      .then(function (res) { if (!res.ok) throw new Error(res.error || 'ไม่ทราบสาเหตุ'); return res.state; });
+      .then(function (r) { return r.text(); })
+      .then(function (txt) {
+        var res;
+        try { res = JSON.parse(txt); } catch (e) { throw new Error('ระบบตอบกลับไม่ใช่ข้อมูลที่อ่านได้'); }
+        if (!res.ok) throw new Error(res.error || 'ไม่ทราบสาเหตุ');
+        return res.state;
+      });
   }
 
   function fmt(n) { return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -128,14 +133,27 @@
     var btn = this;
     btn.disabled = true;
     msg.textContent = 'กำลังบันทึก…';
-    api('POST', null, { action: 'snapshot-save', t: TOKEN, asOf: state.asOf, entries: entries })
-      .then(function (s) {
-        render(s);
-        document.getElementById('msg').textContent = s.complete
-          ? '✓ บันทึกครบ ' + s.expected + ' บัญชีแล้ว ส่งบิลได้'
-          : 'บันทึกแล้ว ยังขาด: ' + s.missing.join(', ');
-      })
-      .catch(function (e) { btn.disabled = false; msg.textContent = 'บันทึกไม่สำเร็จ: ' + e.message; });
+    var asOf = state.asOf;
+    function done(s) {
+      render(s);
+      document.getElementById('msg').textContent = s.complete
+        ? '✓ บันทึกครบ ' + s.expected + ' บัญชีแล้ว ส่งบิลได้'
+        : 'บันทึกแล้ว ยังขาด: ' + s.missing.join(', ');
+    }
+    api('GET', { page: 'snapshot-api', action: 'save', t: TOKEN, asOf: asOf, entries: JSON.stringify(entries) })
+      .then(done)
+      .catch(function (e) {
+        // ผลตอบกลับอาจหายระหว่างทางทั้งที่บันทึกลงชีทแล้ว — โหลดยอดจากชีทมาเทียบก่อนบอกว่าพลาด
+        msg.textContent = 'กำลังตรวจกับชีท…';
+        api('GET', { page: 'snapshot-api', t: TOKEN, asOf: asOf }).then(function (s) {
+          var saved = {};
+          s.accounts.forEach(function (a) { if (a.saved != null) saved[a.code] = Number(a.saved); });
+          var bad = entries.filter(function (x) { return !(x.code in saved) || Math.abs(saved[x.code] - Number(x.amount)) > 0.001; });
+          if (!bad.length) return done(s);
+          btn.disabled = false;
+          msg.textContent = 'บันทึกไม่สำเร็จ (' + bad.map(function (x) { return x.code; }).join(', ') + '): ' + e.message;
+        }).catch(function () { btn.disabled = false; msg.textContent = 'บันทึกไม่สำเร็จ: ' + e.message; });
+      });
   });
 
   load(params.get('asOf') || '');

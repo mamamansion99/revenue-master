@@ -8,7 +8,7 @@
  *****/
 const SNAPSHOT_SHEET_NAME = 'Bank Reconciliation Dashboard';
 const SNAPSHOT_FIRST_ROW = 41;
-const SNAPSHOT_LAST_ROW = 238;
+const SNAPSHOT_LAST_ROW = 1000; // เติม Month+Account ไว้ล่วงหน้าถึง 2030-12 (แถว 895)
 const SNAPSHOT_DAY = 24;
 const SNAPSHOT_STATUS = 'OPENING_CAPTURED';
 const SNAPSHOT_TOKEN_SHA256 = '0dd7580e44334dc5baf779aa078db7b32547f71d7d3a8a6b67bc58d4e424b7e8';
